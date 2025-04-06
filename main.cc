@@ -45,24 +45,26 @@ struct Position
         return r == 0 || r == R - 1 || c == 0 || c == C - 1;
     }
 
-    std::set<Position> neighbors() const
+    static const std::vector<Position> edges;
+
+    std::vector<Position> neighbors() const
     {
-        std::set<Position> ret;
+        std::vector<Position> ret;
 
         const auto maybe_insert = [&ret](Position p)
         {
             if (p.is_valid())
             {
-                ret.insert(p);
+                ret.push_back(p);
             }
         };
 
+        maybe_insert(Position(r, c - 1));
         maybe_insert(Position(r - 1, c - ((r + 1) % 2)));
         maybe_insert(Position(r - 1, c - ((r + 1) % 2) + 1));
-        maybe_insert(Position(r, c - 1));
         maybe_insert(Position(r, c + 1));
-        maybe_insert(Position(r + 1, c - ((r + 1) % 2)));
         maybe_insert(Position(r + 1, c - ((r + 1) % 2) + 1));
+        maybe_insert(Position(r + 1, c - ((r + 1) % 2)));
 
         return ret;
     }
@@ -83,6 +85,24 @@ struct Position
     }
 };
 
+const std::vector<Position> Position::edges = []()
+{
+    std::vector<Position> ret;
+
+    for (int_t r = 0; r < R; ++r)
+    {
+        for (int_t c = 0; c < C; ++c)
+        {
+            Position p(r, c);
+            if (p.is_edge())
+            {
+                ret.push_back(p);
+            }
+        }
+    }
+    return ret;
+}();
+
 void throw_error(char s, int_t r, int_t c, int line_no)
 {
     throw std::runtime_error(std::string("Unexpected on line ") + std::to_string(line_no) +
@@ -98,104 +118,72 @@ struct Board
 
     std::optional<Position> move_cat()
     {
-        struct SearchState
+        std::map<Position, int> pos2num_paths;
+        std::set<Position> layer;
+        for (const auto &p : Position::edges)
         {
-            std::bitset<N> visited;
-            std::map<Position, int> pos2num_paths;
-
-            bool exhausted() const
-            {
-                return pos2num_paths.empty();
-            }
-
-            int num_edge_paths() const
-            {
-                int ret = 0;
-                for (const auto [p, num_paths] : pos2num_paths)
-                {
-                    if (p.is_edge())
-                    {
-                        ret += num_paths;
-                    }
-                }
-
-                return ret;
-            }
-
-            void take_step(const std::bitset<N> &cells)
-            {
-                std::map<Position, int> new_pos2num_paths;
-
-                for (const auto [p, num_paths] : pos2num_paths)
-                {
-                    for (const auto pp : p.neighbors())
-                    {
-                        if (!cells[pp.idx()] && !visited[pp.idx()])
-                        {
-                            new_pos2num_paths[pp] += num_paths;
-                        }
-                    }
-                }
-
-                pos2num_paths = new_pos2num_paths;
-                for (const auto [p, _] : pos2num_paths)
-                {
-                    visited[p.idx()] = true;
-                }
-            }
-        };
-
-        std::map<Position, SearchState> moves2search_state;
-        for (const auto p : cat_position.neighbors())
-        {
+            pos2num_paths[p] = cells[p.idx()] ? 0 : 1;
             if (!cells[p.idx()])
             {
-                auto &search_state = moves2search_state[p];
-                search_state.visited[cat_position.idx()] = true;
-                search_state.visited[p.idx()] = true;
-                search_state.pos2num_paths[p] = 1;
+                layer.insert(p);
             }
         }
 
         while (true)
         {
-            if (moves2search_state.empty())
+            if (layer.empty())
             {
+                // Cat not found
                 return std::nullopt;
             }
 
-            std::optional<Position> best_move;
-            int most_edge_paths = 0;
-            for (const auto &[move, search_state] : moves2search_state)
+            if (layer.count(cat_position) > 0)
             {
-                const auto num_edge_paths = search_state.num_edge_paths();
-                if (num_edge_paths > most_edge_paths)
+                int best_num_paths = 0;
+                Position best_move;
+                for (const auto p : cat_position.neighbors())
                 {
-                    best_move = move;
-                    most_edge_paths = num_edge_paths;
-                }
-            }
+                    if (layer.count(p) > 0)
+                    {
+                        continue;
+                    }
 
-            if (best_move.has_value())
-            {
-                cat_position = *best_move;
+                    if (auto it = pos2num_paths.find(p);
+                        it != pos2num_paths.end() && it->second > best_num_paths)
+                    {
+                        best_move = it->first;
+                        best_num_paths = it->second;
+                    }
+                }
+
+                if (best_num_paths == 0)
+                {
+                    throw std::runtime_error("sth bad happened oops");
+                }
+
+                cat_position = best_move;
                 return best_move;
             }
 
-            auto it = moves2search_state.begin();
-            while (it != moves2search_state.end())
+            std::set<Position> next_layer;
+            for (const auto &p : layer)
             {
-                auto &search_state = it->second;
-                search_state.take_step(cells);
-                if (search_state.exhausted())
+                for (const auto &pp : p.neighbors())
                 {
-                    it = moves2search_state.erase(it);
-                }
-                else
-                {
-                    ++it;
+                    if (cells[pp.idx()])
+                    {
+                        continue;
+                    }
+
+                    if (next_layer.count(pp) || !pos2num_paths.count(pp))
+                    {
+                        pos2num_paths[pp] += pos2num_paths[p];
+                        next_layer.insert(pp);
+                    }
                 }
             }
+
+            layer = next_layer;
         }
     }
 
@@ -425,12 +413,24 @@ struct AutoPlayer : BasePlayer
         first_state.board = board;
         pq.emplace(first_state);
 
+        bool first = true;
+
         while (true)
         {
             std::clog << "Popping top of " << pq.size() << " states: " << std::endl;
             auto current_ptr = std::make_shared<SearchState>(pq.top());
             pq.pop();
             auto &current_state = *current_ptr;
+
+            if (first)
+            {
+                first = false;
+            }
+            else
+            {
+                current_state.board.move_cat();
+            }
+
             std::clog << current_state << std::endl;
 
             if (current_state.cached_min_cat_moves == N)
@@ -456,7 +456,6 @@ struct AutoPlayer : BasePlayer
                         SearchState next_state;
                         Board next_board = current_state.board;
                         next_board.cells[p.idx()] = true;
-                        next_board.move_cat();
                         next_state.board = next_board;
                         next_state.num_moves = current_state.num_moves + 1;
                         next_state.previous = current_ptr;
